@@ -16,3 +16,4 @@ venv/
 .tox/
 .coverage
 htmlcov/
+AGENTS.md
