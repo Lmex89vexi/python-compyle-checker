@@ -225,7 +225,7 @@ def _check_eof_newline(filepath: Path) -> list[str]:
 # ---------------------------------------------------------------------------
 
 
-def check_file(filepath: Path, *, check_style: bool = True) -> tuple[bool, list[str]]:
+def check_file(filepath: Path, *, check_style: bool = True, show_warnings: bool = False) -> tuple[bool, list[str]]:
     """Check a single Python file for syntax and style issues.
 
     Runs ``py_compile`` to detect fatal syntax errors, then optionally
@@ -239,6 +239,9 @@ def check_file(filepath: Path, *, check_style: bool = True) -> tuple[bool, list[
         Path to the ``.py`` file to check.
     check_style
         When *True* (default), also run style checks.
+    show_warnings
+        When *True*, log style warnings.  Otherwise they are collected
+        silently and only reflected in the summary count.
 
     Returns
     -------
@@ -261,16 +264,17 @@ def check_file(filepath: Path, *, check_style: bool = True) -> tuple[bool, list[
     if check_style:
         style_warnings.extend(_check_trailing_whitespace(filepath))
         style_warnings.extend(_check_eof_newline(filepath))
-        for w in style_warnings:
-            log.warning("WARN   %s — %s", filepath, w)
+        if show_warnings:
+            for w in style_warnings:
+                log.warning("WARN   %s — %s", filepath, w)
 
-    if syntax_ok and not style_warnings:
+    if syntax_ok and not (style_warnings and show_warnings):
         log.info("OK     %s", filepath)
 
     return syntax_ok, style_warnings
 
 
-def _run_checks(files: list[Path], *, check_style: bool = True) -> int:
+def _run_checks(files: list[Path], *, check_style: bool = True, show_warnings: bool = False) -> int:
     """Check all *files*, log summary, return exit code.
 
     Iterates over *files*, runs :func:`check_file` on each, aggregates
@@ -292,7 +296,7 @@ def _run_checks(files: list[Path], *, check_style: bool = True) -> int:
         checks.append("style (trailing-whitespace, eof-newline)")
     log.info("Checking %d file(s) [%s] …", len(files), ", ".join(checks))
 
-    results = [check_file(f, check_style=check_style) for f in files]
+    results = [check_file(f, check_style=check_style, show_warnings=show_warnings) for f in files]
     passed = sum(1 for ok, _ in results if ok)
     failed = len(results) - passed
     total_warnings = sum(len(w) for _, w in results)
@@ -342,31 +346,30 @@ def build_parser() -> argparse.ArgumentParser:
         help="Exclude untracked .py files (included by default)",
     )
     parser.add_argument(
-        "-q", "--quiet",
+        "-w", "--warnings",
         action="store_true",
-        help="Only show failures and summary (suppress OK/WARN lines)",
+        dest="show_warnings",
+        help="Show style warnings (trailing whitespace, EOF newline)",
     )
     parser.add_argument(
-        "-v", "--verbose",
+        "-q", "--quiet",
         action="store_true",
-        help="Show every checked file (this is the default)",
+        help="Suppress OK lines; show only failures and summary",
     )
-    parser.set_defaults(verbose=True)
     return parser
 
 
-def setup_logging(*, quiet: bool, verbose: bool) -> None:
+def setup_logging(*, quiet: bool) -> None:
     """Configure root logger for the script.
 
     Controls what gets written to stderr:
 
-    * **quiet** — only ``WARNING`` and above (failures, summary)
-    * **verbose** — ``INFO`` and above (the default, shows ``OK`` lines)
-    * **neither** — falls back to ``WARNING`` (same as quiet)
+    * **quiet** — only ``WARNING`` and above (failures, DONE summary)
+    * **default** — ``INFO`` and above (OK, failures, DONE)
 
     The format is ``%(message)s`` — bare log text with no extra fields.
     """
-    level = logging.WARNING if quiet else (logging.INFO if verbose else logging.WARNING)
+    level = logging.WARNING if quiet else logging.INFO
     logging.basicConfig(
         level=level,
         format="%(message)s",
@@ -384,7 +387,7 @@ def main(argv: list[str] | None = None) -> int:
        HEAD via ``git diff`` and ``git ls-files``.
 
     Logging is configured early so all subsequent output, including
-    discovery messages, respects the ``--quiet`` / ``--verbose`` flags.
+    discovery messages, respects the ``--quiet`` flag.
 
     Returns
     -------
@@ -394,12 +397,13 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
 
-    setup_logging(quiet=args.quiet, verbose=args.verbose)
+    setup_logging(quiet=args.quiet)
     check_style = not args.syntax_only
+    show_warnings = args.show_warnings
 
     if args.paths:
         files = collect_py_files([Path(p) for p in args.paths])
-        return _run_checks(files, check_style=check_style)
+        return _run_checks(files, check_style=check_style, show_warnings=show_warnings)
 
     if not _in_git_repo():
         log.error(
@@ -414,7 +418,7 @@ def main(argv: list[str] | None = None) -> int:
         log.error("Git invocation failed: %s", exc)
         return 1
 
-    return _run_checks(files, check_style=check_style)
+    return _run_checks(files, check_style=check_style, show_warnings=show_warnings)
 
 
 if __name__ == "__main__":

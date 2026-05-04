@@ -41,9 +41,9 @@ To remove:
 
 # Style checks
 ./git-pycheck.py --syntax-only   # skip trailing whitespace / EOF newline checks
-./git-pycheck.py -q              # errors only (suppress OK/WARN lines)
+./git-pycheck.py -w              # show style warnings (hidden by default)
+./git-pycheck.py -q              # suppress OK lines; show only failures/summary
 ./git-pycheck.py --no-untracked  # skip new untracked files
-./git-pycheck.py -v              # verbose (default, explicit)
 ```
 
 Exit codes: `0` = all passed, `1` = at least one failure.
@@ -68,3 +68,11 @@ Each file is compiled with `py_compile.compile(..., doraise=True)` to detect
 syntax errors. No code is executed. Style checks read the file directly.
 
 Outside a Git repo, explicit paths are required.
+
+## Tests
+
+```sh
+./test_git_pycheck.py        # run all tests
+./test_git_pycheck.py -v     # include checker output
+./test_git_pycheck.py test_clean  # single test
+```
