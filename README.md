@@ -10,6 +10,25 @@ Uses only `py_compile` from Python's standard library. Zero dependencies.
 - Python 3.8+
 - Git
 
+## Install
+
+```sh
+# System-wide (sudo)
+./install.sh install
+
+# User-local (~/.local/bin, no sudo)
+./install.sh install --user
+```
+
+Now use `git-pycheck` from anywhere.
+
+To remove:
+
+```sh
+./install.sh uninstall      # remove system-wide
+./install.sh uninstall --user
+```
+
 ## Usage
 
 ```sh
