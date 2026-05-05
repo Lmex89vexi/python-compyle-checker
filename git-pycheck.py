@@ -21,12 +21,17 @@ By default, each file is checked for:
 
 Use ``--syntax-only`` to skip the style checks.
 
+Use ``--check-imports`` to also verify that every top-level import
+resolves via ``importlib.util.find_spec``.
+
 Exit codes:
     0   all files passed (or nothing to check)
-    1   one or more files have syntax errors
+    1   one or more files have fatal errors (syntax or unresolved import)
 """
 
 import argparse
+import ast
+import importlib.util
 import logging
 import py_compile
 import subprocess
@@ -221,17 +226,99 @@ def _check_eof_newline(filepath: Path) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
+# Import check  (optional, controlled by --check-imports)
+# ---------------------------------------------------------------------------
+
+# Cache for find_spec results within a single file (cleared between files
+# since sys.path may differ).
+_import_cache: dict[str, bool | None] = {}
+
+
+def _module_resolves(name: str) -> bool | None:
+    """Return ``True`` if *name* can be imported, ``False`` if not.
+
+    Uses ``importlib.util.find_spec`` which resolves the module
+    without executing its code.  Results are cached so the same
+    module name is only looked up once per file.
+    """
+    if name in _import_cache:
+        return _import_cache[name]
+    try:
+        spec = importlib.util.find_spec(name)
+        _import_cache[name] = spec is not None
+        return spec is not None
+    except (ModuleNotFoundError, ValueError):
+        _import_cache[name] = False
+        return False
+
+
+def _find_project_root(filepath: Path) -> Path | None:
+    """Walk up from *filepath* looking for a ``.git`` directory."""
+    for parent in filepath.parents:
+        if (parent / ".git").is_dir():
+            return parent
+    return None
+
+
+def _check_imports(filepath: Path) -> list[str]:
+    """Check that all top-level imports in *filepath* resolve.
+
+    Parses the file with ``ast`` and inspects every ``import X`` and
+    ``from X import Y`` statement.  Relative imports (``.foo``) are
+    skipped since they require runtime context.
+
+    Before checking, the project root (git root, or file parent as
+    fallback) is temporarily added to ``sys.path`` so that project-local
+    packages resolve correctly.
+
+    Returns
+    -------
+    list[str]
+        Error messages for each unresolved import.
+        Empty when all imports resolve.
+    """
+    errors: list[str] = []
+    try:
+        tree = ast.parse(filepath.read_bytes())
+    except SyntaxError:
+        return errors
+
+    # Add project root to sys.path so local imports resolve
+    root = _find_project_root(filepath) or filepath.parent.resolve()
+    sys.path.insert(0, str(root))
+    try:
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    if not _module_resolves(alias.name):
+                        errors.append(f"cannot resolve import '{alias.name}'")
+            elif isinstance(node, ast.ImportFrom):
+                if node.level:
+                    continue
+                if node.module:
+                    if not _module_resolves(node.module):
+                        errors.append(f"cannot resolve import '{node.module}'")
+    finally:
+        sys.path.pop(0)
+        _import_cache.clear()
+
+    return errors
+
+
+# ---------------------------------------------------------------------------
 # Core logic
 # ---------------------------------------------------------------------------
 
 
-def check_file(filepath: Path, *, check_style: bool = True, show_warnings: bool = False) -> tuple[bool, list[str]]:
-    """Check a single Python file for syntax and style issues.
+def check_file(filepath: Path, *, check_style: bool = True, show_warnings: bool = False,
+               check_imports: bool = False) -> tuple[bool, list[str]]:
+    """Check a single Python file for syntax, style, and import issues.
 
-    Runs ``py_compile`` to detect fatal syntax errors, then optionally
-    checks for common style problems (trailing whitespace, missing EOF
-    newline).  Output is written to the log immediately per file so
-    the user sees incremental progress.
+    Runs ``py_compile`` to detect fatal syntax errors, optionally
+    verifies that imported modules resolve (``--check-imports``), and
+    optionally checks for common style problems (trailing whitespace,
+    missing EOF newline).  Output is written to the log immediately
+    per file so the user sees incremental progress.
 
     Parameters
     ----------
@@ -242,23 +329,33 @@ def check_file(filepath: Path, *, check_style: bool = True, show_warnings: bool 
     show_warnings
         When *True*, log style warnings.  Otherwise they are collected
         silently and only reflected in the summary count.
+    check_imports
+        When *True*, verify that every top-level import resolves via
+        ``importlib.util.find_spec``.
 
     Returns
     -------
     tuple[bool, list[str]]
         ``(syntax_ok, style_warnings)`` where *syntax_ok* is ``True``
-        when the file passes ``py_compile``, and *style_warnings*
-        lists any non-fatal policy violations found.
+        when the file passes all fatal checks (syntax + imports),
+        and *style_warnings* lists any non-fatal policy violations.
     """
     style_warnings: list[str] = []
+    syntax_ok = True
 
-    # Syntax — the only check that produces a hard failure
+    # Syntax — fatal on failure
     try:
         py_compile.compile(str(filepath), doraise=True)
-        syntax_ok = True
     except py_compile.PyCompileError as exc:
         log.error("FAIL   %s — %s", filepath, exc)
         syntax_ok = False
+
+    # Import resolution — fatal on failure
+    if check_imports:
+        import_errors = _check_imports(filepath)
+        for err in import_errors:
+            log.error("FAIL   %s — %s", filepath, err)
+            syntax_ok = False
 
     # Style — warnings only, never cause a non-zero exit
     if check_style:
@@ -274,7 +371,8 @@ def check_file(filepath: Path, *, check_style: bool = True, show_warnings: bool 
     return syntax_ok, style_warnings
 
 
-def _run_checks(files: list[Path], *, check_style: bool = True, show_warnings: bool = False) -> int:
+def _run_checks(files: list[Path], *, check_style: bool = True, show_warnings: bool = False,
+                check_imports: bool = False) -> int:
     """Check all *files*, log summary, return exit code.
 
     Iterates over *files*, runs :func:`check_file` on each, aggregates
@@ -294,9 +392,12 @@ def _run_checks(files: list[Path], *, check_style: bool = True, show_warnings: b
     checks = ["syntax"]
     if check_style:
         checks.append("style (trailing-whitespace, eof-newline)")
+    if check_imports:
+        checks.append("imports")
     log.info("Checking %d file(s) [%s] …", len(files), ", ".join(checks))
 
-    results = [check_file(f, check_style=check_style, show_warnings=show_warnings) for f in files]
+    results = [check_file(f, check_style=check_style, show_warnings=show_warnings,
+                          check_imports=check_imports) for f in files]
     passed = sum(1 for ok, _ in results if ok)
     failed = len(results) - passed
     total_warnings = sum(len(w) for _, w in results)
@@ -338,6 +439,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--syntax-only",
         action="store_true",
         help="Skip style checks (trailing whitespace, EOF newline)",
+    )
+    parser.add_argument(
+        "--check-imports",
+        action="store_true",
+        help="Verify that every top-level import resolves (stdlib + installed packages)",
     )
     parser.add_argument(
         "--no-untracked",
@@ -400,10 +506,12 @@ def main(argv: list[str] | None = None) -> int:
     setup_logging(quiet=args.quiet)
     check_style = not args.syntax_only
     show_warnings = args.show_warnings
+    check_imports = args.check_imports
 
     if args.paths:
         files = collect_py_files([Path(p) for p in args.paths])
-        return _run_checks(files, check_style=check_style, show_warnings=show_warnings)
+        return _run_checks(files, check_style=check_style, show_warnings=show_warnings,
+                           check_imports=check_imports)
 
     if not _in_git_repo():
         log.error(
@@ -418,7 +526,8 @@ def main(argv: list[str] | None = None) -> int:
         log.error("Git invocation failed: %s", exc)
         return 1
 
-    return _run_checks(files, check_style=check_style, show_warnings=show_warnings)
+    return _run_checks(files, check_style=check_style, show_warnings=show_warnings,
+                       check_imports=check_imports)
 
 
 if __name__ == "__main__":

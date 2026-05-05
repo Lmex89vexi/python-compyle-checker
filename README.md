@@ -41,12 +41,13 @@ To remove:
 
 # Style checks
 ./git-pycheck.py --syntax-only   # skip trailing whitespace / EOF newline checks
+./git-pycheck.py --check-imports # verify imports resolve (stdlib + installed)
 ./git-pycheck.py -w              # show style warnings (hidden by default)
 ./git-pycheck.py -q              # suppress OK lines; show only failures/summary
 ./git-pycheck.py --no-untracked  # skip new untracked files
 ```
 
-Exit codes: `0` = all passed, `1` = at least one failure.
+Exit codes: `0` = all passed, `1` = at least one failure (syntax or import).
 Style warnings never cause a non-zero exit.
 
 ## Checks performed
@@ -54,6 +55,7 @@ Style warnings never cause a non-zero exit.
 | Check | Type | What it catches |
 |---|---|---|
 | **Syntax** | error | `SyntaxError`, `IndentationError`, `TabError`, `from __future__` ordering |
+| **Imports** | error | Unresolved top-level imports via `importlib.util.find_spec` (opt-in) |
 | **Trailing whitespace** | warning | Lines ending with space or tab |
 | **EOF newline** | warning | File missing final `\n` (POSIX convention) |
 
@@ -67,12 +69,16 @@ When run inside a Git repo without arguments, it finds changed `.py` files via:
 Each file is compiled with `py_compile.compile(..., doraise=True)` to detect
 syntax errors. No code is executed. Style checks read the file directly.
 
+With `--check-imports`, the file is parsed with `ast` and every top-level
+import is validated via `importlib.util.find_spec()`, which resolves the
+module without running its code.
+
 Outside a Git repo, explicit paths are required.
 
 ## Tests
 
 ```sh
-./test_git_pycheck.py        # run all tests
+./test_git_pycheck.py        # run all 15 tests
 ./test_git_pycheck.py -v     # include checker output
 ./test_git_pycheck.py test_clean  # single test
 ```
